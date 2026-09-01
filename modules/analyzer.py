@@ -8,7 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.retrievers import BM25Retriever
-from langchain.retrievers.ensemble import EnsembleRetriever
+
 
 
 # ==========================================================
@@ -96,18 +96,10 @@ def build_retriever(pdf_path):
 
     embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     db = FAISS.from_documents(chunks, embedding)
-    faiss = db.as_retriever(search_kwargs={"k": 25})
-
-    bm25 = BM25Retriever.from_texts(
-        [c.page_content for c in chunks],
-        metadatas=[c.metadata for c in chunks]
-    )
-    bm25.k = 25
-
-    retriever = EnsembleRetriever(retrievers=[faiss, bm25], weights=[0.6, 0.4])
+    retriever = db.as_retriever(search_kwargs={"k": 25})
+    
+    # Return only the FAISS retriever (no ensemble)
     return retriever
-
-
 # ==========================================================
 # RETRIEVAL (unchanged)
 # ==========================================================
