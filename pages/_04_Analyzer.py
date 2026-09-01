@@ -62,7 +62,7 @@ def check_api_connection():
     }
     
     try:
-        response = requests.post(base_url, json=payload, headers=headers, timeout=10)
+        response = requests.post(base_url, json=payload, headers=headers, timeout=300)
         
         if response.status_code == 200:
             return True, "✅ API Connected"
