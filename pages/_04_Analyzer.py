@@ -11,6 +11,7 @@ from pathlib import Path
 import requests
 import tempfile
 import shutil
+from analyzer import get_usage_summary
 
 # ----- Fix imports -----
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -604,6 +605,19 @@ if source_mode == "📁 Local folder (articles)":
         else:
             st.error(status_message)
             st.caption("⚠️ Extraction will fail. Check your API key in config.yaml")
+            # ----- Token Usage Dashboard -----
+            st.divider()
+            st.subheader("📊 Weekly Token Usage")
+            
+            summary = get_usage_summary()
+            used = summary["total_used"]
+            remaining = summary["remaining"]
+            percent = summary["percent"]
+            
+            st.metric("Used", f"{used:,}", delta=None)
+            st.metric("Remaining", f"{remaining:,}", delta=None)
+            st.progress(min(100, percent) / 100)
+            st.caption(f"Limit: {summary['limit']:,} tokens")
 
 elif source_mode == "🗄️ Database":
     df = get_articles_with_pdfs()
