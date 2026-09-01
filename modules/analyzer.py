@@ -1,12 +1,69 @@
 import json
 import re
 import yaml
-import requests   # <-- added for direct API calls
+import requests
+import time   # <-- added for sleep
 
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+
+
+# ==========================================================
+# RETRY WRAPPER
+# ==========================================================
+
+def call_api_with_retry(
+    url,
+    headers,
+    payload,
+    max_retries=5,
+    initial_timeout=300,
+    backoff_factor=2
+):
+    """
+    Makes an API request with automatic retries for 429 (rate limit) and timeouts.
+    Returns the response object on success, or raises an exception after exhausting retries.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=initial_timeout)
+
+            # If rate limited (429)
+            if response.status_code == 429:
+                # Try to read Retry-After header, fallback to 10 seconds
+                retry_after = int(response.headers.get('Retry-After', 10))
+                wait_time = retry_after + 1   # add a small buffer
+                print(f"⚠️ Rate limited (429). Waiting {wait_time} seconds before retry...")
+                time.sleep(wait_time)
+                continue  # retry
+
+            # For other 4xx/5xx errors that are not 429, raise immediately
+            response.raise_for_status()
+            return response  # success
+
+        except requests.exceptions.Timeout:
+            # Exponential backoff for timeouts
+            wait_time = backoff_factor ** attempt
+            print(f"⏰ Timeout (attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+
+        except requests.exceptions.ConnectionError:
+            wait_time = backoff_factor ** attempt
+            print(f"🔌 Connection error (attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+
+        except requests.exceptions.RequestException as e:
+            # For other request exceptions (e.g., 500), retry with backoff
+            if attempt < max_retries - 1:
+                wait_time = backoff_factor ** attempt
+                print(f"❌ Request error: {e}. Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+            else:
+                raise  # re-raise if max retries exceeded
+
+    raise Exception(f"❌ Max retries ({max_retries}) exceeded. Request failed.")
 
 
 # ==========================================================
@@ -44,30 +101,26 @@ class DeepSeekChat:
             ]
         }
 
+        # ---- Replace the old requests.post call with the retry wrapper ----
         try:
-            response = requests.post(self.api_url, headers=headers, json=payload, timeout=120)
-            
-            # --- Better error messages ---
-            if response.status_code == 403:
-                raise Exception("❌ 403 Forbidden: Invalid API Key or insufficient permissions.")
-            if response.status_code == 401:
-                raise Exception("❌ 401 Unauthorized: Invalid credentials.")
-            if response.status_code == 402:
-                raise Exception("❌ 402 Payment Required: Please check your DeepSeek balance.")
-            if response.status_code != 200:
-                raise Exception(f"❌ API Error {response.status_code}: {response.text[:200]}")
+            response = call_api_with_retry(
+                url=self.api_url,
+                headers=headers,
+                payload=payload,
+                max_retries=5,
+                initial_timeout=300   # increased from 120 to 300
+            )
 
             result = response.json()
             return result["choices"][0]["message"]["content"]
-            
-        except requests.exceptions.Timeout:
-            raise Exception("❌ Connection timeout: API unreachable.")
-        except requests.exceptions.ConnectionError:
-            raise Exception("❌ Connection error: Check your internet or API endpoint.")
+
+        except Exception as e:
+            # Re-raise a clear error message
+            raise Exception(f"❌ API call failed after retries: {str(e)}")
 
 
 # ==========================================================
-# PDF PROCESSING
+# PDF PROCESSING (unchanged)
 # ==========================================================
 
 def extract_section_title(text):
@@ -96,13 +149,11 @@ def build_retriever(pdf_path):
     embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     db = FAISS.from_documents(chunks, embedding)
     retriever = db.as_retriever(search_kwargs={"k": 25})
-    
-    # Return only the FAISS retriever (no ensemble)
     return retriever
 
 
 # ==========================================================
-# RETRIEVAL
+# RETRIEVAL (unchanged)
 # ==========================================================
 
 RETRIEVAL_QUERIES = [
@@ -128,7 +179,6 @@ RETRIEVAL_QUERIES = [
 def build_context(retriever):
     docs = []
     for query in RETRIEVAL_QUERIES:
-        # Use invoke() instead of the deprecated get_relevant_documents
         docs.extend(retriever.invoke(query))
 
     unique_docs = []
@@ -151,7 +201,7 @@ SECTION: {d.metadata.get('section')}
 
 
 # ==========================================================
-# EXTRACTION
+# EXTRACTION (unchanged)
 # ==========================================================
 
 def extract_structured_data(llm, context):
@@ -219,12 +269,11 @@ Paper Text:
         "You are a materials science and scientific literature extraction expert.",
         prompt
     )
-    # Return the raw string – DO NOT parse JSON here
     return response
 
 
 # ==========================================================
-# MAIN ENTRY (returns RAG details)
+# MAIN ENTRY (unchanged)
 # ==========================================================
 
 def analyze_pdf(pdf_path):
@@ -232,18 +281,14 @@ def analyze_pdf(pdf_path):
     retriever = build_retriever(pdf_path)
     context = build_context(retriever)
     
-    # 1. Get the raw JSON string from the LLM
-    raw_response = extract_structured_data(llm, context)  # Now returns a string
+    raw_response = extract_structured_data(llm, context)
     
-    # 2. Parse the raw string into a dict
     try:
         parsed_result = json.loads(raw_response)
     except json.JSONDecodeError as e:
-        # If parsing fails, store the raw string in the result
         parsed_result = {"error": "Invalid JSON returned from LLM", "raw": raw_response}
         print(f"JSON decode error: {e}")
     
-    # 3. Return all information needed for logging and saving
     return {
         "result": parsed_result,
         "raw_response": raw_response,
