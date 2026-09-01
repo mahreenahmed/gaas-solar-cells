@@ -254,7 +254,7 @@ def build_context(retriever):
             seen.add(key)
 
     context = []
-    for d in unique_docs[:15]:
+    for d in unique_docs[:10]:
         context.append(f"""
 PAGE: {d.metadata.get('page')}
 SECTION: {d.metadata.get('section')}
@@ -264,7 +264,7 @@ SECTION: {d.metadata.get('section')}
     full_context = "\n\n-------------------\n\n".join(context)
 
     # Truncate to avoid overly long prompts
-    MAX_CONTEXT_CHARS = 12000
+    MAX_CONTEXT_CHARS = 8000
     if len(full_context) > MAX_CONTEXT_CHARS:
         full_context = full_context[:MAX_CONTEXT_CHARS] + "\n... (truncated)"
         print(f"⚠️ Context truncated to {MAX_CONTEXT_CHARS} chars")
