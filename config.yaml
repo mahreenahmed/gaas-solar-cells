@@ -1,0 +1,8 @@
+db:
+  path: "materials_properties.db"
+
+downloads_dir: "downloads"
+deepseek:
+    api_key: "sk-jX70jQkKOQUKnY0ZU8Pavw"
+    base_url: "https://models.sjtu.edu.cn/api/v1/chat/completions"
+    api_model: "qwen"   # or "deepseek-reasoner" if available
