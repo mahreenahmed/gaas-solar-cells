@@ -3,6 +3,6 @@ db:
 
 downloads_dir: "downloads"
 deepseek:
-    api_key: "sk-jX70jQkKOQUKnY0ZU8Pavw"
+    api_key: "sk-eNqsn_YPZAtcQ6yM-iQbCg"
     base_url: "https://models.sjtu.edu.cn/api/v1/chat/completions"
     api_model: "qwen"   # or "deepseek-reasoner" if available
