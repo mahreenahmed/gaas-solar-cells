@@ -9,7 +9,6 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
 
-
 # ==========================================================
 # LLM WRAPPER (no openai, uses requests)
 # ==========================================================
@@ -66,8 +65,9 @@ class DeepSeekChat:
         except requests.exceptions.ConnectionError:
             raise Exception("❌ Connection error: Check your internet or API endpoint.")
 
+
 # ==========================================================
-# PDF PROCESSING (unchanged)
+# PDF PROCESSING
 # ==========================================================
 
 def extract_section_title(text):
@@ -99,8 +99,10 @@ def build_retriever(pdf_path):
     
     # Return only the FAISS retriever (no ensemble)
     return retriever
+
+
 # ==========================================================
-# RETRIEVAL (unchanged)
+# RETRIEVAL
 # ==========================================================
 
 RETRIEVAL_QUERIES = [
@@ -126,7 +128,8 @@ RETRIEVAL_QUERIES = [
 def build_context(retriever):
     docs = []
     for query in RETRIEVAL_QUERIES:
-        docs.extend(retriever.get_relevant_documents(query))
+        # Use invoke() instead of the deprecated get_relevant_documents
+        docs.extend(retriever.invoke(query))
 
     unique_docs = []
     seen = set()
@@ -148,7 +151,7 @@ SECTION: {d.metadata.get('section')}
 
 
 # ==========================================================
-# EXTRACTION (unchanged)
+# EXTRACTION
 # ==========================================================
 
 def extract_structured_data(llm, context):
@@ -218,12 +221,10 @@ Paper Text:
     )
     # Return the raw string – DO NOT parse JSON here
     return response
-# ==========================================================
-# MAIN ENTRY
-# ==========================================================
+
 
 # ==========================================================
-# MAIN ENTRY (UPDATED to return RAG details)
+# MAIN ENTRY (returns RAG details)
 # ==========================================================
 
 def analyze_pdf(pdf_path):
