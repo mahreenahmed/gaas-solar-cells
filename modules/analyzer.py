@@ -11,16 +11,16 @@ from langchain_community.vectorstores import FAISS
 
 
 # ==========================================================
-# RETRY WRAPPER (with sensible timeouts)
+# RETRY WRAPPER (optimised for large PDFs)
 # ==========================================================
 
 def call_api_with_retry(
     url,
     headers,
     payload,
-    max_retries=2,              # only retry twice
+    max_retries=3,              # only 3 retries to avoid long hangs
     connect_timeout=10,         # fail fast if network is down
-    read_timeout=120,           # 2 minutes for LLM generation
+    read_timeout=180,           # 3 minutes for LLM generation (increased from 120)
     backoff_factor=2
 ):
     """
@@ -63,7 +63,7 @@ def call_api_with_retry(
             if attempt < max_retries - 1:
                 time.sleep(wait_time)
             else:
-                raise Exception("❌ LLM took too long to respond. Try a smaller PDF or contact support.")
+                raise Exception("❌ LLM took too long. Try a smaller PDF or increase read_timeout.")
 
         except requests.exceptions.ConnectionError:
             print(f"🔌 Connection error (attempt {attempt+1}). Retrying...")
@@ -114,7 +114,8 @@ class DeepSeekChat:
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
-            ]
+            ],
+            "max_tokens": 2048   # Limit output length to speed up response
         }
 
         # Use the retry wrapper
@@ -122,9 +123,9 @@ class DeepSeekChat:
             url=self.api_url,
             headers=headers,
             payload=payload,
-            max_retries=2,
+            max_retries=3,
             connect_timeout=10,
-            read_timeout=120
+            read_timeout=180      # 3 minutes should be enough for most PDFs
         )
 
         result = response.json()
@@ -132,7 +133,7 @@ class DeepSeekChat:
 
 
 # ==========================================================
-# PDF PROCESSING
+# PDF PROCESSING (with reduced chunk sizes)
 # ==========================================================
 
 def extract_section_title(text):
@@ -153,19 +154,21 @@ def build_retriever(pdf_path):
     for doc in docs:
         doc.metadata["page"] = doc.metadata.get("page", 0) + 1
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
+    # Reduced chunk size to avoid sending too much text
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
     for chunk in chunks:
         chunk.metadata["section"] = extract_section_title(chunk.page_content)
 
     embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     db = FAISS.from_documents(chunks, embedding)
-    retriever = db.as_retriever(search_kwargs={"k": 25})
+    # Retrieve fewer documents per query
+    retriever = db.as_retriever(search_kwargs={"k": 10})
     return retriever
 
 
 # ==========================================================
-# RETRIEVAL
+# RETRIEVAL (with smaller context)
 # ==========================================================
 
 RETRIEVAL_QUERIES = [
@@ -201,19 +204,28 @@ def build_context(retriever):
             unique_docs.append(d)
             seen.add(key)
 
+    # Keep only the most relevant 15 documents (reduced from 30)
     context = []
-    for d in unique_docs[:30]:
+    for d in unique_docs[:15]:
         context.append(f"""
 PAGE: {d.metadata.get('page')}
 SECTION: {d.metadata.get('section')}
 
 {d.page_content}
 """)
-    return "\n\n-------------------\n\n".join(context)
+    full_context = "\n\n-------------------\n\n".join(context)
+
+    # Truncate the total context to 12,000 characters (~3,000 tokens)
+    MAX_CONTEXT_CHARS = 12000
+    if len(full_context) > MAX_CONTEXT_CHARS:
+        full_context = full_context[:MAX_CONTEXT_CHARS] + "\n... (truncated)"
+        print(f"⚠️ Context truncated to {MAX_CONTEXT_CHARS} characters")
+
+    return full_context
 
 
 # ==========================================================
-# EXTRACTION
+# EXTRACTION (unchanged)
 # ==========================================================
 
 def extract_structured_data(llm, context):
@@ -285,7 +297,7 @@ Paper Text:
 
 
 # ==========================================================
-# MAIN ENTRY (returns RAG details)
+# MAIN ENTRY
 # ==========================================================
 
 def analyze_pdf(pdf_path):
