@@ -2,7 +2,7 @@ import json
 import re
 import yaml
 import requests
-import time   # <-- added for sleep
+import time
 
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -11,59 +11,75 @@ from langchain_community.vectorstores import FAISS
 
 
 # ==========================================================
-# RETRY WRAPPER
+# RETRY WRAPPER (with sensible timeouts)
 # ==========================================================
 
 def call_api_with_retry(
     url,
     headers,
     payload,
-    max_retries=5,
-    initial_timeout=300,
+    max_retries=2,              # only retry twice
+    connect_timeout=10,         # fail fast if network is down
+    read_timeout=120,           # 2 minutes for LLM generation
     backoff_factor=2
 ):
     """
-    Makes an API request with automatic retries for 429 (rate limit) and timeouts.
-    Returns the response object on success, or raises an exception after exhausting retries.
+    Makes an API request with automatic retries for transient errors.
+    - connect_timeout: time to wait for TCP handshake
+    - read_timeout: time to wait for the server to send the full response
     """
     for attempt in range(max_retries):
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=initial_timeout)
+            # Use separate connect and read timeouts
+            response = requests.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=(connect_timeout, read_timeout)
+            )
 
-            # If rate limited (429)
+            # Handle rate limiting (429)
             if response.status_code == 429:
-                # Try to read Retry-After header, fallback to 10 seconds
-                retry_after = int(response.headers.get('Retry-After', 10))
-                wait_time = retry_after + 1   # add a small buffer
-                print(f"⚠️ Rate limited (429). Waiting {wait_time} seconds before retry...")
+                retry_after = int(response.headers.get('Retry-After', 5))
+                wait_time = retry_after + 1
+                print(f"⚠️ Rate limited (429). Waiting {wait_time}s before retry...")
                 time.sleep(wait_time)
                 continue  # retry
 
-            # For other 4xx/5xx errors that are not 429, raise immediately
+            # For other 4xx/5xx, raise immediately (e.g., auth errors)
             response.raise_for_status()
             return response  # success
 
-        except requests.exceptions.Timeout:
-            # Exponential backoff for timeouts
-            wait_time = backoff_factor ** attempt
-            print(f"⏰ Timeout (attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
-            time.sleep(wait_time)
-
-        except requests.exceptions.ConnectionError:
-            wait_time = backoff_factor ** attempt
-            print(f"🔌 Connection error (attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
-            time.sleep(wait_time)
-
-        except requests.exceptions.RequestException as e:
-            # For other request exceptions (e.g., 500), retry with backoff
+        except requests.exceptions.ConnectTimeout:
+            print(f"🔌 Connection timeout (attempt {attempt+1}). Check your network/VPN.")
             if attempt < max_retries - 1:
-                wait_time = backoff_factor ** attempt
-                print(f"❌ Request error: {e}. Retrying in {wait_time}s...")
+                time.sleep(2)
+            else:
+                raise Exception("❌ Cannot reach API. Are you on the campus network or VPN?")
+
+        except requests.exceptions.ReadTimeout:
+            wait_time = backoff_factor ** attempt
+            print(f"⏰ Read timeout (attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
+            if attempt < max_retries - 1:
                 time.sleep(wait_time)
             else:
-                raise  # re-raise if max retries exceeded
+                raise Exception("❌ LLM took too long to respond. Try a smaller PDF or contact support.")
 
-    raise Exception(f"❌ Max retries ({max_retries}) exceeded. Request failed.")
+        except requests.exceptions.ConnectionError:
+            print(f"🔌 Connection error (attempt {attempt+1}). Retrying...")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+            else:
+                raise Exception("❌ Network connection error. Check your internet.")
+
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                print(f"❌ Request error: {e}. Retrying...")
+                time.sleep(2)
+            else:
+                raise
+
+    raise Exception("❌ Max retries exceeded. Request failed.")
 
 
 # ==========================================================
@@ -101,26 +117,22 @@ class DeepSeekChat:
             ]
         }
 
-        # ---- Replace the old requests.post call with the retry wrapper ----
-        try:
-            response = call_api_with_retry(
-                url=self.api_url,
-                headers=headers,
-                payload=payload,
-                max_retries=5,
-                initial_timeout=300   # increased from 120 to 300
-            )
+        # Use the retry wrapper
+        response = call_api_with_retry(
+            url=self.api_url,
+            headers=headers,
+            payload=payload,
+            max_retries=2,
+            connect_timeout=10,
+            read_timeout=120
+        )
 
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
-
-        except Exception as e:
-            # Re-raise a clear error message
-            raise Exception(f"❌ API call failed after retries: {str(e)}")
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
 
 
 # ==========================================================
-# PDF PROCESSING (unchanged)
+# PDF PROCESSING
 # ==========================================================
 
 def extract_section_title(text):
@@ -153,7 +165,7 @@ def build_retriever(pdf_path):
 
 
 # ==========================================================
-# RETRIEVAL (unchanged)
+# RETRIEVAL
 # ==========================================================
 
 RETRIEVAL_QUERIES = [
@@ -201,7 +213,7 @@ SECTION: {d.metadata.get('section')}
 
 
 # ==========================================================
-# EXTRACTION (unchanged)
+# EXTRACTION
 # ==========================================================
 
 def extract_structured_data(llm, context):
@@ -273,7 +285,7 @@ Paper Text:
 
 
 # ==========================================================
-# MAIN ENTRY (unchanged)
+# MAIN ENTRY (returns RAG details)
 # ==========================================================
 
 def analyze_pdf(pdf_path):
