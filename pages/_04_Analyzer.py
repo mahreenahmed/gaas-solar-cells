@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 import requests
+import tempfile
+import shutil
 
 # ----- Fix imports -----
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -85,6 +87,8 @@ def check_api_connection():
 
 # ----- Constants -----
 ARTICLES_BASE = os.path.join(parent_dir, "articles")
+UPLOAD_DIR = os.path.join(ARTICLES_BASE, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -561,12 +565,13 @@ st.markdown("Extract materials science data using hybrid retrieval + DeepSeek LL
 # ----- Source selection -----
 source_mode = st.radio(
     "Select article source:",
-    ["📁 Local folder (articles)", "🗄️ Database"],
+    ["📁 Local folder (articles)", "🗄️ Database", "📤 Upload PDF"],
     horizontal=True,
 )
 
 article_id = None
 pdf_path = None
+uploaded_file = None
 
 if source_mode == "📁 Local folder (articles)":
     st.subheader("📂 Choose from articles folder")
@@ -600,7 +605,7 @@ if source_mode == "📁 Local folder (articles)":
             st.error(status_message)
             st.caption("⚠️ Extraction will fail. Check your API key in config.yaml")
 
-else:  # Database mode
+elif source_mode == "🗄️ Database":
     df = get_articles_with_pdfs()
     if df.empty:
         st.warning("No PDFs available in database.")
@@ -633,11 +638,47 @@ else:  # Database mode
         else:
             st.error(status_message)
 
+else:  # Upload PDF
+    st.subheader("📤 Upload a PDF File")
+    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+    
+    if uploaded_file is not None:
+        # Generate a unique filename and save to uploads directory
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = f"upload_{timestamp}_{uploaded_file.name}"
+        save_path = os.path.join(UPLOAD_DIR, safe_name)
+        
+        with open(save_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        
+        pdf_path = save_path
+        st.success(f"✅ File saved to: `{save_path}`")
+        st.info("📄 File is now stored permanently and can be accessed later from the database.")
+    else:
+        st.info("Please upload a PDF to begin.")
+    
+    with st.sidebar:
+        st.subheader("ℹ️ Upload Info")
+        if uploaded_file is not None:
+            st.markdown(f"**Filename:** {uploaded_file.name}")
+            st.markdown(f"**Size:** {uploaded_file.size // 1024} KB")
+            st.markdown(f"**Saved as:** `{os.path.basename(pdf_path)}`")
+        else:
+            st.markdown("No file uploaded yet.")
+        st.divider()
+        st.subheader("🔌 API Status")
+        is_connected, status_message = check_api_connection()
+        if is_connected:
+            st.success(status_message)
+        else:
+            st.error(status_message)
+            st.caption("⚠️ Extraction will fail. Check your API key in config.yaml")
 
 # ----- Analysis button -----
 api_ok, _ = check_api_connection()
+button_disabled = not api_ok or (source_mode == "📤 Upload PDF" and uploaded_file is None)
 
-if st.button("🚀 Run Extraction", type="primary", use_container_width=True, disabled=not api_ok):
+if st.button("🚀 Run Extraction", type="primary", use_container_width=True, disabled=button_disabled):
     if not pdf_path or not os.path.exists(pdf_path):
         st.error(f"PDF file not found: {pdf_path}")
         st.stop()
