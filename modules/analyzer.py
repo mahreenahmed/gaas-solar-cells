@@ -7,7 +7,8 @@ from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.retrievers import BM25Retriever, EnsembleRetriever
+from langchain.retrievers import BM25Retriever
+from langchain.retrievers.ensemble import EnsembleRetriever
 
 
 # ==========================================================
