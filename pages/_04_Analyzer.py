@@ -6,12 +6,12 @@ import sys
 import sqlite3
 import json
 import time
+import traceback          # <-- added
 from datetime import datetime
 from pathlib import Path
 import requests
 import tempfile
 import shutil
-from analyzer import get_usage_summary
 
 # ----- Fix imports -----
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +20,7 @@ modules_dir = os.path.join(parent_dir, "modules")
 if modules_dir not in sys.path:
     sys.path.insert(0, modules_dir)
 
-from analyzer import analyze_pdf
+from analyzer import analyze_pdf, get_usage_summary
 
 # ----- Locate config -----
 def find_config():
@@ -210,17 +210,13 @@ def get_or_create_property(conn, property_name, category=None):
 
 
 # ============================================================
-# SMART ROUTER: Store to Dedicated Tables (ORM-compatible)
+# SMART ROUTER: Store to Dedicated Tables
 # ============================================================
-# ----------------------------------------------------------------------
-# SMART ROUTER: Store to Dedicated Tables (exact schema match)
-# ----------------------------------------------------------------------
 
 def store_temperature_property(conn, article_id, data):
-    """Inserts into temperature_properties."""
     cursor = conn.cursor()
     material = data.get("material")
-    property_name = data.get("property")   # e.g., "CTE", "Elastic Modulus"
+    property_name = data.get("property")
     temp_c = data.get("temperature_c")
     value = data.get("value")
     unit = data.get("unit")
@@ -248,7 +244,6 @@ def store_temperature_property(conn, article_id, data):
 
 
 def store_fatigue_property(conn, article_id, data):
-    """Inserts into fatigue_properties."""
     cursor = conn.cursor()
     material = data.get("material")
     property_name = data.get("property")
@@ -282,9 +277,6 @@ def store_fatigue_property(conn, article_id, data):
 
 
 def store_interface_property(conn, article_id, data):
-    """Inserts into interface_properties.
-       Note: uses material_id and material12_id (from your schema).
-    """
     cursor = conn.cursor()
     mat1 = data.get("material_1")
     mat2 = data.get("material_2")
@@ -318,35 +310,30 @@ def store_interface_property(conn, article_id, data):
 
 
 def store_constitutive_model(conn, article_id, data):
-    """Insert or update constitutive_models for a material."""
     cursor = conn.cursor()
     material = data.get("material")
     model_name = data.get("model_name")
     params = data.get("parameters", {})
     
-    if not model_name or not material:   # <-- ADD THIS CHECK
+    if not model_name or not material:
         return 0
     
-    mat_id = ensure_material_exists(conn, material) 
-    # Extract Voce parameters
+    mat_id = ensure_material_exists(conn, material)
     linear_coeff = params.get("linear_coefficient") or params.get("linear")
     exp_coeff = params.get("exponential_coefficient") or params.get("exponential")
     sat_stress = params.get("saturation_stress") or params.get("saturation")
     yield_stress = params.get("yield_stress_initial") or params.get("yield")
     
-    # Remaining params as JSON
     temp_dep = {k: v for k, v in params.items() 
                 if k not in ["linear_coefficient", "exponential_coefficient", 
                              "saturation_stress", "yield_stress_initial",
                              "linear", "exponential", "saturation", "yield"]}
     temp_dep_json = json.dumps(temp_dep) if temp_dep else None
     
-    # Check if a record already exists for this material
     cursor.execute("SELECT id FROM constitutive_models WHERE material_id = ?", (mat_id,))
     row = cursor.fetchone()
     
     if row:
-        # Update existing record
         cursor.execute("""
             UPDATE constitutive_models
             SET model_type = ?,
@@ -360,7 +347,6 @@ def store_constitutive_model(conn, article_id, data):
         """, (model_name, linear_coeff, exp_coeff, sat_stress, yield_stress,
               temp_dep_json, article_id, mat_id))
     else:
-        # Insert new record
         cursor.execute("""
             INSERT INTO constitutive_models
             (material_id, model_type, linear_coefficient, exponential_coefficient,
@@ -372,8 +358,8 @@ def store_constitutive_model(conn, article_id, data):
     conn.commit()
     return 1
 
+
 def store_bending_property(conn, article_id, data):
-    """Inserts into bending_parameters."""
     cursor = conn.cursor()
     material = data.get("material")
     property_name = data.get("property")
@@ -391,13 +377,7 @@ def store_bending_property(conn, article_id, data):
     except (ValueError, TypeError):
         prop_val = None
     
-    # Heuristic mapping to columns
-    bend_radius = None
-    strain = None
-    critical_load = None
-    deflection = None
-    load = None
-    
+    bend_radius = strain = critical_load = deflection = load = None
     if "radius" in property_name.lower():
         bend_radius = prop_val
     elif "strain" in property_name.lower():
@@ -419,7 +399,6 @@ def store_bending_property(conn, article_id, data):
 
 
 def store_generic_property(conn, article_id, data):
-    """Fallback: inserts into material_properties (has article_id)."""
     cursor = conn.cursor()
     material = data.get("material")
     property_name = data.get("property")
@@ -444,35 +423,31 @@ def store_generic_property(conn, article_id, data):
         VALUES (?, ?, ?, ?, ?, ?)
     """, (mat_id, prop_id, prop_val, unit, conditions, article_id))
     return 1
+
+
 # ============================================================
-# UPSERT ARTICLE METADATA (ORM-compatible)
+# UPSERT ARTICLE METADATA
 # ============================================================
 def get_or_create_article_from_pdf(pdf_path, result_metadata):
-    """
-    Insert or update the articles table with all metadata extracted from the PDF.
-    Returns the article ID.
-    """
     abs_pdf_path = os.path.abspath(pdf_path)
     article_info = result_metadata.get("article", {})
     
-    # Convert authors (list -> semicolon string)
     authors_raw = article_info.get("authors", "")
     if isinstance(authors_raw, list):
         authors = "; ".join(authors_raw)
     else:
         authors = str(authors_raw) if authors_raw else ""
     
-    # Map to ORM columns (+ ALTERed columns: pdf_path, abstract, main_findings)
     data = {
         "title": article_info.get("title", os.path.basename(pdf_path)),
         "authors": authors,
         "journal": article_info.get("journal", ""),
         "date": str(article_info.get("year", "")) if article_info.get("year") else "",
-        "source": article_info.get("doi", ""),  # ORM uses 'source' for DOI
-        "pdf_path": abs_pdf_path,               # ALTERed column
+        "source": article_info.get("doi", ""),
+        "pdf_path": abs_pdf_path,
         "innovations": article_info.get("innovation", ""),
-        "main_findings": article_info.get("main_findings", ""),  # ALTERed column
-        "abstract": article_info.get("abstract", ""),            # ALTERed column
+        "main_findings": article_info.get("main_findings", ""),
+        "abstract": article_info.get("abstract", ""),
         "fabrication_process": article_info.get("fabrication_process", ""),
         "battery_structure": article_info.get("device_structure", ""),
         "efficiency_percent": article_info.get("efficiency_percent"),
@@ -491,8 +466,6 @@ def get_or_create_article_from_pdf(pdf_path, result_metadata):
     
     conn = get_connection()
     cursor = conn.cursor()
-    
-    # Check if article already exists by pdf_path
     cursor.execute("SELECT id FROM articles WHERE pdf_path = ?", (abs_pdf_path,))
     row = cursor.fetchone()
     
@@ -557,6 +530,20 @@ def get_folder_structure(base_path):
 
 
 # ============================================================
+# SIDEBAR USAGE DASHBOARD (helper)
+# ============================================================
+def sidebar_usage_dashboard():
+    """Display token usage summary in the sidebar."""
+    st.divider()
+    st.subheader("📊 Weekly Token Usage")
+    summary = get_usage_summary()
+    st.metric("Used", f"{summary['total_used']:,}")
+    st.metric("Remaining", f"{summary['remaining']:,}")
+    st.progress(min(100, summary['percent']) / 100)
+    st.caption(f"Limit: {summary['limit']:,} tokens")
+
+
+# ============================================================
 # UI
 # ============================================================
 st.set_page_config(page_title="PDF Analyzer", layout="wide")
@@ -605,15 +592,9 @@ if source_mode == "📁 Local folder (articles)":
         else:
             st.error(status_message)
             st.caption("⚠️ Extraction will fail. Check your API key in config.yaml")
-            # ----- Token Usage Dashboard -----
-            st.divider()
-            st.subheader("📊 Weekly Token Usage")
-            from analyzer import get_usage_summary
-            summary = get_usage_summary()
-            st.metric("Used", f"{summary['total_used']:,}")
-            st.metric("Remaining", f"{summary['remaining']:,}")
-            st.progress(min(100, summary['percent']) / 100)
-            st.caption(f"Limit: {summary['limit']:,} tokens")
+        
+        # ---- USAGE DASHBOARD ----
+        sidebar_usage_dashboard()
 
 elif source_mode == "🗄️ Database":
     df = get_articles_with_pdfs()
@@ -647,13 +628,15 @@ elif source_mode == "🗄️ Database":
             st.success(status_message)
         else:
             st.error(status_message)
+        
+        # ---- USAGE DASHBOARD ----
+        sidebar_usage_dashboard()
 
 else:  # Upload PDF
     st.subheader("📤 Upload a PDF File")
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
     
     if uploaded_file is not None:
-        # Generate a unique filename and save to uploads directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_name = f"upload_{timestamp}_{uploaded_file.name}"
         save_path = os.path.join(UPLOAD_DIR, safe_name)
@@ -683,6 +666,9 @@ else:  # Upload PDF
         else:
             st.error(status_message)
             st.caption("⚠️ Extraction will fail. Check your API key in config.yaml")
+        
+        # ---- USAGE DASHBOARD ----
+        sidebar_usage_dashboard()
 
 # ----- Analysis button -----
 api_ok, _ = check_api_connection()
@@ -693,7 +679,6 @@ if st.button("🚀 Run Extraction", type="primary", use_container_width=True, di
         st.error(f"PDF file not found: {pdf_path}")
         st.stop()
     
-    # Use a status container to show progress
     with st.status("📄 Analyzing PDF...", expanded=True) as status:
         try:
             status.update(label="⏳ Loading PDF and building retriever...")
@@ -726,13 +711,29 @@ if st.button("🚀 Run Extraction", type="primary", use_container_width=True, di
             conn.commit()
             conn.close()
             
-            # Save properties
+            # ---- Save all property types ----
             conn = get_connection()
             total_saved = 0
             try:
                 for item in result.get("temperature_properties", []):
                     total_saved += store_temperature_property(conn, article_id, item)
-                # ... all other property stores ...
+                for item in result.get("fatigue_properties", []):
+                    total_saved += store_fatigue_property(conn, article_id, item)
+                for item in result.get("interface_properties", []):
+                    total_saved += store_interface_property(conn, article_id, item)
+                for item in result.get("constitutive_models", []):
+                    total_saved += store_constitutive_model(conn, article_id, item)
+                for item in result.get("bending_properties", []):
+                    total_saved += store_bending_property(conn, article_id, item)
+                
+                fallback_items = (
+                    result.get("material_properties", []) +
+                    result.get("mechanical_properties", []) +
+                    result.get("experimental_measurements", [])
+                )
+                for item in fallback_items:
+                    total_saved += store_generic_property(conn, article_id, item)
+                
                 conn.commit()
             except Exception as db_err:
                 conn.rollback()
@@ -746,8 +747,10 @@ if st.button("🚀 Run Extraction", type="primary", use_container_width=True, di
         except Exception as e:
             status.update(label=f"❌ Error: {str(e)}", state="error")
             st.code(traceback.format_exc())
+
+
 # ============================================================
-# DISPLAY RESULTS
+# DISPLAY RESULTS (unchanged)
 # ============================================================
 if 'last_result' in st.session_state and (source_mode == "🗄️ Database" or ('last_article_id' in st.session_state and st.session_state.get('last_article_id') == article_id)):
     result = st.session_state['last_result']
@@ -858,6 +861,8 @@ if article_id is not None:
             
     except Exception as e:
         st.warning(f"Could not load previous properties: {e}")
+
+
 # ============================================================
 # ENHANCED RAG WORKFLOW VIEWER
 # ============================================================
@@ -865,7 +870,6 @@ with st.expander("🧠 RAG Workflow Inspector (Debugging)", expanded=False):
     try:
         conn = get_connection()
         
-        # Query the RAG table properly
         df_rag = pd.read_sql("""
             SELECT 
                 id,
@@ -887,20 +891,16 @@ with st.expander("🧠 RAG Workflow Inspector (Debugging)", expanded=False):
         conn.close()
 
         if not df_rag.empty:
-            # --- Show Summary Stats ---
             total_runs = len(df_rag)
             success_count = len(df_rag[df_rag['status'] == '✅ Success'])
             st.caption(f"📊 Last {total_runs} runs: {success_count} successful, {total_runs - success_count} failed.")
             
-            # --- Interactive Inspector ---
             for idx, row in df_rag.iterrows():
-                # Create an expander for each run
                 with st.expander(f"🔎 Run {row['id']} | Article: {row['article_id']} | {row['timestamp']} | {row['status']}"):
                     col_a, col_b = st.columns(2)
                     
                     with col_a:
                         st.markdown("**📥 Retrieved Context (Query)**")
-                        # Fetch the full context for this specific run
                         conn_detail = get_connection()
                         cursor_detail = conn_detail.cursor()
                         cursor_detail.execute("SELECT query FROM rag_workflow WHERE id = ?", (row['id'],))
@@ -910,22 +910,18 @@ with st.expander("🧠 RAG Workflow Inspector (Debugging)", expanded=False):
                     
                     with col_b:
                         st.markdown("**📤 LLM Response**")
-                        # Fetch the full response
                         conn_detail = get_connection()
                         cursor_detail = conn_detail.cursor()
                         cursor_detail.execute("SELECT response FROM rag_workflow WHERE id = ?", (row['id'],))
                         full_response = cursor_detail.fetchone()[0]
                         conn_detail.close()
                         
-                        # Display the raw response nicely
                         try:
-                            # If it's valid JSON, pretty print it for the user
                             response_json = json.loads(full_response)
-                            st.json(response_json)  # Beautiful formatting
+                            st.json(response_json)
                         except:
                             st.text_area("Raw Response", full_response[:2000] + "..." if len(full_response) > 2000 else full_response, height=200, key=f"resp_{row['id']}")
                     
-                    # Show metadata
                     st.caption(f"🧩 Chunks Retrieved: {row['retrieved_chunks']} | 🌡️ Temperature: {row['temperature']} | 🆔 Article ID: {row['article_id']}")
         else:
             st.info("No RAG workflow records found yet.")
