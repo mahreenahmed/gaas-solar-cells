@@ -205,14 +205,14 @@ def build_retriever(pdf_path):
     for doc in docs:
         doc.metadata["page"] = doc.metadata.get("page", 0) + 1
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=80)
     chunks = splitter.split_documents(docs)
     for chunk in chunks:
         chunk.metadata["section"] = extract_section_title(chunk.page_content)
 
     embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     db = FAISS.from_documents(chunks, embedding)
-    retriever = db.as_retriever(search_kwargs={"k": 10})
+    retriever = db.as_retriever(search_kwargs={"k": 5})
     return retriever
 
 
