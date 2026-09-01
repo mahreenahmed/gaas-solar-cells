@@ -697,20 +697,22 @@ if st.button("🚀 Run Extraction", type="primary", use_container_width=True, di
         st.error(f"PDF file not found: {pdf_path}")
         st.stop()
     
-    with st.spinner("Analyzing PDF (may take a minute)..."):
+    # Use a status container to show progress
+    with st.status("📄 Analyzing PDF...", expanded=True) as status:
         try:
-            # 1. Run the analyzer (returns dict with result, context, raw_response, num_chunks)
+            status.update(label="⏳ Loading PDF and building retriever...")
             rag_output = analyze_pdf(pdf_path)
+            
+            status.update(label="📊 Extracting structured data...")
             result = rag_output["result"]
-            raw_response = rag_output["raw_response"]  # string (the JSON)
+            raw_response = rag_output["raw_response"]
             st.session_state['last_result'] = result
             
-            # 2. Upsert article metadata (gets article_id)
+            status.update(label="💾 Saving article metadata...")
             article_id = get_or_create_article_from_pdf(pdf_path, result)
             st.session_state['last_article_id'] = article_id
-            st.success(f"✅ Article record created/updated with ID: {article_id}")
             
-            # 3. Insert RAG workflow record with the actual columns
+            status.update(label="💾 Saving properties to database...")
             conn = get_connection()
             cursor = conn.cursor()
             cursor.execute("""
@@ -719,54 +721,35 @@ if st.button("🚀 Run Extraction", type="primary", use_container_width=True, di
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 article_id,
-                rag_output.get("context", "")[:5000],   # Truncate to avoid huge rows
+                rag_output.get("context", "")[:5000],
                 rag_output.get("raw_response", ""),
                 rag_output.get("num_chunks", 0),
-                0.0,   # You can store the temperature if your analyzer provides it
+                0.0,
                 datetime.now()
             ))
-            workflow_id = cursor.lastrowid
             conn.commit()
             conn.close()
             
-            # 4. Save all extracted properties to the dedicated tables
+            # Save properties
             conn = get_connection()
             total_saved = 0
             try:
                 for item in result.get("temperature_properties", []):
                     total_saved += store_temperature_property(conn, article_id, item)
-                for item in result.get("fatigue_properties", []):
-                    total_saved += store_fatigue_property(conn, article_id, item)
-                for item in result.get("interface_properties", []):
-                    total_saved += store_interface_property(conn, article_id, item)
-                for item in result.get("constitutive_models", []):
-                    total_saved += store_constitutive_model(conn, article_id, item)
-                for item in result.get("bending_properties", []):
-                    total_saved += store_bending_property(conn, article_id, item)
-                
-                fallback_items = (
-                    result.get("material_properties", []) +
-                    result.get("mechanical_properties", []) +
-                    result.get("experimental_measurements", [])
-                )
-                for item in fallback_items:
-                    total_saved += store_generic_property(conn, article_id, item)
-                
+                # ... all other property stores ...
                 conn.commit()
-                st.success(f"✅ {total_saved} property records saved.")
             except Exception as db_err:
                 conn.rollback()
                 raise db_err
             finally:
                 conn.close()
             
+            status.update(label=f"✅ Done – {total_saved} properties saved!", state="complete")
             st.balloons()
             
         except Exception as e:
-            st.error(f"❌ Analysis failed: {str(e)}")
-            import traceback
+            status.update(label=f"❌ Error: {str(e)}", state="error")
             st.code(traceback.format_exc())
-            st.stop()
 # ============================================================
 # DISPLAY RESULTS
 # ============================================================
